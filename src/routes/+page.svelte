@@ -49,6 +49,8 @@
   let imageFile: File | null = null;
   let imageFileName = '';
   let croppedImageData: ImageData | null = null;
+  let cropGeneration = 0;
+  let bgColor = '#FFFFFF';
   let previewCanvases: HTMLCanvasElement[] = [];
   let previewTiles: PreviewTile[] = [];
   let renderDebounce: ReturnType<typeof setTimeout> | null = null;
@@ -210,6 +212,7 @@
 
   function onCrop(event: CustomEvent<{ croppedImageData: ImageData }>) {
     croppedImageData = event.detail.croppedImageData;
+    cropGeneration++;
   }
 
   $: if (imageFile) {
@@ -328,6 +331,20 @@
     });
   }
 
+  function downloadTileCanvas(index: number, row: number, col: number) {
+    const canvas = previewCanvases[index];
+    if (!canvas) return;
+    canvas.toBlob((blob) => {
+      if (!blob) return;
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = `mapforge_${row}_${col}.png`;
+      link.click();
+      URL.revokeObjectURL(url);
+    });
+  }
+
   function downloadBlob(data: Uint8Array, filename: string) {
     const bytes = new Uint8Array(data);
     const buffer = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
@@ -400,32 +417,34 @@
           brightness: $advancedSettings.brightness
         },
         width: croppedImageData.width,
-        height: croppedImageData.height
+        height: croppedImageData.height,
+        cropGeneration,
+        bgColor
       })
     : '';
 
-  $: if (renderSignature && hasEnabledColours) {
-    worker?.terminate();
-    worker = null;
-    isConverting = false;
+  let _lastScheduledSig = '';
+  function scheduleConvertIfChanged(sig: string, hasColours: boolean) {
+    if (!sig || !hasColours) {
+      if (renderDebounce) { clearTimeout(renderDebounce); renderDebounce = null; }
+      isRenderQueued = false;
+      if (!hasColours || !imageFile) {
+        resultPixels = [];
+        materials = {};
+        previewTiles = [];
+      }
+      return;
+    }
+    if (sig === _lastScheduledSig) return; // no change — skip
+    _lastScheduledSig = sig;
     isRenderQueued = true;
-    progress = 0;
     if (renderDebounce) clearTimeout(renderDebounce);
     renderDebounce = setTimeout(() => {
       renderDebounce = null;
       void convert();
     }, 800);
-  } else {
-    if (renderDebounce) clearTimeout(renderDebounce);
-    renderDebounce = null;
-    isRenderQueued = false;
-
-    if (!hasEnabledColours || !imageFile) {
-      resultPixels = [];
-      materials = {};
-      previewTiles = [];
-    }
   }
+  $: scheduleConvertIfChanged(renderSignature, hasEnabledColours);
 
   $: if (previewTiles.length) {
     void drawPreviewTilesToCanvases();
@@ -828,6 +847,7 @@
             {mapWidth}
             {mapHeight}
             resizeFilter={$advancedSettings.resizeFilter}
+            {bgColor}
             on:crop={onCrop}
           />
 
@@ -836,6 +856,10 @@
             {#if croppedImageData}
               <span>Output {croppedImageData.width}×{croppedImageData.height}px · row-major export order</span>
             {/if}
+            <label class="bg-color-label">
+              <span>Background</span>
+              <input type="color" bind:value={bgColor} title="Fill color for areas outside image" />
+            </label>
           </div>
         {/if}
       </section>
@@ -864,12 +888,14 @@
             <div class="preview-grid" style={`grid-template-columns: repeat(${mapWidth}, max-content);`}>
               {#each previewCells as cell, index}
                 <div class="preview-card">
-                  <div class="preview-card-label">Map [{cell.row},{cell.col}]</div>
                   {#if previewTiles[index]}
+                    <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
                     <canvas
                       bind:this={previewCanvases[index]}
                       class="preview-tile-canvas"
                       style={`width:${previewTileSize}px; height:${previewTileSize}px; image-rendering:pixelated;`}
+                      title="Click to download"
+                      on:click={() => downloadTileCanvas(index, cell.row, cell.col)}
                     ></canvas>
                   {:else}
                     <div class="preview-placeholder" style={`width:${previewTileSize}px; height:${previewTileSize}px;`}>
@@ -981,6 +1007,29 @@
     color: var(--text);
     font-family: system-ui, -apple-system, sans-serif;
     font-size: 14px;
+  }
+
+  /* ── Global scrollbar ─────────────────────────── */
+  :global(::-webkit-scrollbar) {
+    width: 6px;
+    height: 6px;
+  }
+  :global(::-webkit-scrollbar-track) {
+    background: transparent;
+  }
+  :global(::-webkit-scrollbar-thumb) {
+    background: #2e2e3e;
+    border-radius: 3px;
+  }
+  :global(::-webkit-scrollbar-thumb:hover) {
+    background: #45455a;
+  }
+  :global(::-webkit-scrollbar-corner) {
+    background: transparent;
+  }
+  :global(*) {
+    scrollbar-width: thin;
+    scrollbar-color: #2e2e3e transparent;
   }
 
   :root {
@@ -1815,8 +1864,28 @@
   .workspace-meta {
     display: flex;
     justify-content: space-between;
+    align-items: center;
     gap: 12px;
     flex-wrap: wrap;
+  }
+
+  .bg-color-label {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 13px;
+    color: #94a3b8;
+    cursor: pointer;
+  }
+
+  .bg-color-label input[type="color"] {
+    width: 24px;
+    height: 24px;
+    border: 1px solid #334155;
+    border-radius: 4px;
+    padding: 1px;
+    background: transparent;
+    cursor: pointer;
   }
 
   .custom-size-row.inline {
@@ -1839,20 +1908,18 @@
   .preview-card {
     display: flex;
     flex-direction: column;
-    gap: 8px;
-  }
-
-  .preview-card-label {
-    font-size: 12px;
-    color: #cbd5e1;
-    text-align: center;
   }
 
   .preview-tile-canvas,
   .preview-placeholder {
-    border-radius: 10px;
-    border: 1px solid rgba(148, 163, 184, 0.2);
+    border-radius: 0;
+    border: 1px solid rgba(148, 163, 184, 0.25);
     background: rgba(15, 23, 42, 0.9);
+    cursor: pointer;
+  }
+
+  .preview-tile-canvas:hover {
+    border-color: rgba(148, 163, 184, 0.6);
   }
 
   .preview-placeholder {

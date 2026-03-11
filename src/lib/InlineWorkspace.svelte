@@ -13,6 +13,7 @@
   export let mapWidth = 1;
   export let mapHeight = 1;
   export let resizeFilter: 'lanczos' | 'bilinear' | 'nearest' = 'lanczos';
+  export let bgColor = '#FFFFFF';
 
   const dispatch = createEventDispatcher<{
     crop: { croppedImageData: ImageData };
@@ -103,7 +104,8 @@
       context.imageSmoothingQuality = resizeFilter === 'bilinear' ? 'medium' : 'high';
     }
 
-    context.clearRect(0, 0, width, height);
+    context.fillStyle = bgColor;
+    context.fillRect(0, 0, width, height);
     context.drawImage(source, rect.x, rect.y, rect.width, rect.height, 0, 0, width, height);
     return context.getImageData(0, 0, width, height);
   }
