@@ -1,14 +1,12 @@
 <script lang="ts">
-  import { onMount, onDestroy, tick } from 'svelte';
+  import { onMount, onDestroy } from 'svelte';
   import type { McVersion, StaircaseMode, DitherMethod } from '$lib/types.js';
   import { generateSchem, generateLitematic } from '$lib/nbt.js';
   import coloursJSON from '$lib/data/colours.json';
   import { locale, t, selectedVariants, advancedSettings, DEFAULT_ADVANCED } from '$lib/stores.js';
   import { getCategory, CATEGORY_ORDER, type BlockCategory } from '$lib/blockCategories.js';
-  import ImageCropper from '$lib/ImageCropper.svelte';
+  import InlineWorkspace from '$lib/InlineWorkspace.svelte';
   import Tooltip from '$lib/Tooltip.svelte';
-
-  // ── Types ───────────────────────────────────────────────────────────────────
 
   interface BlockVariant {
     blockId: string;
@@ -29,7 +27,11 @@
     blockId: string;
   }
 
-  // ── State ───────────────────────────────────────────────────────────────────
+  interface PreviewTile {
+    row: number;
+    col: number;
+    imageData: ImageData;
+  }
 
   let version: McVersion = '1.20';
   let staircaseMode: StaircaseMode = 'flat';
@@ -38,99 +40,100 @@
   let colourSets: ColourSetInfo[] = [];
   let previewScale = 4;
 
-  // Category collapse state
   const categoryExpanded: Record<BlockCategory, boolean> = {
-    natural: true, stone: true, wood: true, metal: true, terracotta: true, wool: true, misc: true,
+    natural: true, stone: true, wood: true, metal: true, terracotta: true, wool: true, misc: true
   };
 
-  let originalCanvas: HTMLCanvasElement;
-  let resultCanvas: HTMLCanvasElement;
-
-  // Crop & map state
   let mapWidth = 1;
   let mapHeight = 1;
-  let pendingFile: File | null = null;
-  let showCropModal = false;
+  let imageFile: File | null = null;
+  let imageFileName = '';
   let croppedImageData: ImageData | null = null;
+  let previewCanvases: HTMLCanvasElement[] = [];
+  let previewTiles: PreviewTile[] = [];
+  let renderDebounce: ReturnType<typeof setTimeout> | null = null;
+  let lastMapSizeKey = '1x1';
 
   let isDragOver = false;
   let isConverting = false;
+  let isRenderQueued = false;
   let progress = 0;
 
   let resultPixels: MapPixelResult[][] = [];
   let materials: Record<string, number> = {};
   let worker: Worker | null = null;
 
-  // Advanced panel expand state
   let advancedOpen = false;
 
   const MAP_PRESETS: [number, number][] = [
-    [1, 1], [2, 1], [1, 2], [2, 2], [3, 2], [2, 3], [4, 4],
+    [1, 1], [2, 1], [1, 2], [2, 2], [3, 2], [2, 3], [4, 4]
   ];
 
-  // Block presets
   const SURVIVAL_EASY_ENABLED = new Set([
     0, 1, 5, 9, 10, 12, 13,
-    14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, // wool/concrete
+    14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28,
     33, 34,
-    35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, // terracotta
-    57,
+    35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49,
+    57
   ]);
-  const NO_RARE_IDS = new Set([29, 30, 31, 32]); // gold, diamond, lapis, emerald
+  const NO_RARE_IDS = new Set([29, 30, 31, 32]);
 
   function applyPresetSurvivalEasy() {
-    colourSets = colourSets.map((c) => ({ ...c, enabled: SURVIVAL_EASY_ENABLED.has(c.id) }));
+    colourSets = colourSets.map((colour) => ({ ...colour, enabled: SURVIVAL_EASY_ENABLED.has(colour.id) }));
   }
+
   function applyPresetNoRare() {
-    colourSets = colourSets.map((c) => ({ ...c, enabled: c.enabled && !NO_RARE_IDS.has(c.id) }));
+    colourSets = colourSets.map((colour) => ({ ...colour, enabled: colour.enabled && !NO_RARE_IDS.has(colour.id) }));
   }
-  function applyPresetFull() { selectAll(); }
+
+  function applyPresetFull() {
+    selectAll();
+  }
+
   const versions: McVersion[] = ['1.20', '1.19', '1.18.2', '1.17.1', '1.16.5'];
   const scales = [1, 2, 4, 8];
 
-  // ── Init ────────────────────────────────────────────────────────────────────
-
   onMount(() => {
-    const raw = coloursJSON as Record<string, {
+    const raw = coloursJSON as unknown as Record<string, {
       tonesRGB: { normal: [number, number, number] };
       blocks: Record<string, { displayName: string }>;
     }>;
 
-    colourSets = Object.entries(raw).map(([idStr, cs]) => {
+    colourSets = Object.entries(raw).map(([idStr, colourSet]) => {
       const id = parseInt(idStr, 10);
-      const blocks: BlockVariant[] = Object.entries(cs.blocks).map(([blockId, block]) => ({
+      const blocks: BlockVariant[] = Object.entries(colourSet.blocks).map(([blockId, block]) => ({
         blockId,
-        displayName: block.displayName,
+        displayName: block.displayName
       }));
+
       return {
         id,
         name: blocks[0]?.displayName ?? `Color ${idStr}`,
-        rgb: cs.tonesRGB.normal,
+        rgb: colourSet.tonesRGB.normal,
         enabled: true,
-        blocks,
+        blocks
       };
     });
 
-    // Init selectedVariants store with first block per colour
     const initVariants: Record<number, string> = {};
-    for (const cs of colourSets) {
-      initVariants[cs.id] = cs.blocks[0]?.blockId ?? '';
+    for (const colourSet of colourSets) {
+      initVariants[colourSet.id] = colourSet.blocks[0]?.blockId ?? '';
     }
     selectedVariants.set(initVariants);
   });
 
-  onDestroy(() => worker?.terminate());
-
-  // ── Categorized view ────────────────────────────────────────────────────────
+  onDestroy(() => {
+    worker?.terminate();
+    if (renderDebounce) clearTimeout(renderDebounce);
+  });
 
   $: categorized = (() => {
     const groups = {} as Record<BlockCategory, ColourSetInfo[]>;
-    for (const cat of CATEGORY_ORDER) groups[cat] = [];
-    for (const cs of colourSets) {
-      const cat = getCategory(cs.id);
-      groups[cat].push(cs);
+    for (const category of CATEGORY_ORDER) groups[category] = [];
+    for (const colourSet of colourSets) {
+      groups[getCategory(colourSet.id)].push(colourSet);
     }
-    return CATEGORY_ORDER.map((cat) => ({ cat, items: groups[cat] })).filter((g) => g.items.length > 0);
+    return CATEGORY_ORDER.map((cat) => ({ cat, items: groups[cat] })).filter((group) => group.items.length > 0);
   })();
 
   function toggleCategory(cat: BlockCategory) {
@@ -138,195 +141,209 @@
   }
 
   function selectAllInCategory(cat: BlockCategory, enabled: boolean) {
-    colourSets = colourSets.map((cs) =>
-      getCategory(cs.id) === cat ? { ...cs, enabled } : cs
-    );
+    colourSets = colourSets.map((colourSet) => getCategory(colourSet.id) === cat ? { ...colourSet, enabled } : colourSet);
   }
 
-  function selectAll()  { colourSets = colourSets.map((c) => ({ ...c, enabled: true })); }
-  function selectNone() { colourSets = colourSets.map((c) => ({ ...c, enabled: false })); }
+  function selectAll() {
+    colourSets = colourSets.map((colour) => ({ ...colour, enabled: true }));
+  }
+
+  function selectNone() {
+    colourSets = colourSets.map((colour) => ({ ...colour, enabled: false }));
+  }
+
   function toggleColour(id: number) {
-    colourSets = colourSets.map((c) => c.id === id ? { ...c, enabled: !c.enabled } : c);
+    colourSets = colourSets.map((colour) => colour.id === id ? { ...colour, enabled: !colour.enabled } : colour);
   }
 
   function setVariant(id: number, blockId: string) {
-    selectedVariants.update((v) => ({ ...v, [id]: blockId }));
-    // Update display name in colourSets
-    colourSets = colourSets.map((cs) => {
-      if (cs.id !== id) return cs;
-      const block = cs.blocks.find((b) => b.blockId === blockId);
-      return { ...cs, name: block?.displayName ?? cs.name };
+    selectedVariants.update((variants) => ({ ...variants, [id]: blockId }));
+    colourSets = colourSets.map((colourSet) => {
+      if (colourSet.id !== id) return colourSet;
+      const block = colourSet.blocks.find((entry) => entry.blockId === blockId);
+      return { ...colourSet, name: block?.displayName ?? colourSet.name };
     });
   }
 
-  // ── Image handling ───────────────────────────────────────────────────────────
-
   function loadImageFile(file: File) {
-    pendingFile = file;
-    showCropModal = true;
+    imageFile = file;
+    imageFileName = file.name;
+    croppedImageData = null;
+    previewTiles = [];
+    previewCanvases = [];
+    resultPixels = [];
+    materials = {};
+    progress = 0;
+    worker?.terminate();
+    worker = null;
+    if (renderDebounce) clearTimeout(renderDebounce);
+    renderDebounce = null;
+    isRenderQueued = false;
+    isConverting = false;
   }
 
-  // ── Image preprocessing ──────────────────────────────────────────────────────
-
   function preprocessImageData(src: ImageData, satBoost: number, brightness: number): ImageData {
-    // satBoost: -50 to +50 (%), brightness: -50 to +50 (%)
     if (satBoost === 0 && brightness === 0) return src;
+
     const out = new ImageData(src.width, src.height);
     const data = src.data;
-    const d = out.data;
-    const satMul = 1 + satBoost / 100;
-    const briOff = brightness * 2.55;
+    const output = out.data;
+    const saturationMultiplier = 1 + satBoost / 100;
+    const brightnessOffset = brightness * 2.55;
 
-    for (let i = 0; i < data.length; i += 4) {
-      let r = data[i] + briOff;
-      let g = data[i + 1] + briOff;
-      let b = data[i + 2] + briOff;
-      // Saturation adjustment via luminance
-      const lum = 0.299 * r + 0.587 * g + 0.114 * b;
-      r = lum + satMul * (r - lum);
-      g = lum + satMul * (g - lum);
-      b = lum + satMul * (b - lum);
-      d[i]     = Math.max(0, Math.min(255, r));
-      d[i + 1] = Math.max(0, Math.min(255, g));
-      d[i + 2] = Math.max(0, Math.min(255, b));
-      d[i + 3] = data[i + 3];
+    for (let index = 0; index < data.length; index += 4) {
+      let r = data[index] + brightnessOffset;
+      let g = data[index + 1] + brightnessOffset;
+      let b = data[index + 2] + brightnessOffset;
+      const luminance = 0.299 * r + 0.587 * g + 0.114 * b;
+      r = luminance + saturationMultiplier * (r - luminance);
+      g = luminance + saturationMultiplier * (g - luminance);
+      b = luminance + saturationMultiplier * (b - luminance);
+      output[index] = Math.max(0, Math.min(255, r));
+      output[index + 1] = Math.max(0, Math.min(255, g));
+      output[index + 2] = Math.max(0, Math.min(255, b));
+      output[index + 3] = data[index + 3];
     }
+
     return out;
   }
 
-  function onCrop(e: CustomEvent<{ imageData: ImageData; mapWidth: number; mapHeight: number }>) {
-    croppedImageData = e.detail.imageData;
-    mapWidth = e.detail.mapWidth;
-    mapHeight = e.detail.mapHeight;
-    showCropModal = false;
-    pendingFile = null;
-
-    // Draw to originalCanvas (show pre-processed preview)
-    drawOriginalCanvas();
-    // Reset result
-    resultPixels = [];
-    materials = {};
+  function onCrop(event: CustomEvent<{ croppedImageData: ImageData }>) {
+    croppedImageData = event.detail.croppedImageData;
   }
 
-  function drawOriginalCanvas() {
-    if (!croppedImageData || !originalCanvas) return;
-    const adv = $advancedSettings;
-    const processed = preprocessImageData(croppedImageData, adv.saturationBoost, adv.brightness);
-    originalCanvas.width  = processed.width;
-    originalCanvas.height = processed.height;
-    originalCanvas.getContext('2d')!.putImageData(processed, 0, 0);
+  $: if (imageFile) {
+    const sizeKey = `${mapWidth}x${mapHeight}`;
+    if (sizeKey !== lastMapSizeKey) {
+      lastMapSizeKey = sizeKey;
+      croppedImageData = null;
+      previewTiles = [];
+      previewCanvases = [];
+      resultPixels = [];
+      materials = {};
+    }
   }
 
-  // Re-draw when sat/brightness changes
-  $: if (croppedImageData && originalCanvas) {
-    drawOriginalCanvas();
-  }
-
-  function onCropCancel() {
-    showCropModal = false;
-    pendingFile = null;
-  }
-
-  function onDrop(e: DragEvent) {
-    e.preventDefault();
+  function onDrop(event: DragEvent) {
+    event.preventDefault();
     isDragOver = false;
-    const file = e.dataTransfer?.files[0];
+    const file = event.dataTransfer?.files[0];
     if (file && file.type.startsWith('image/')) loadImageFile(file);
   }
 
-  function onFileInput(e: Event) {
-    const input = e.target as HTMLInputElement;
+  function onFileInput(event: Event) {
+    const input = event.target as HTMLInputElement;
     const file = input.files?.[0];
     if (file) loadImageFile(file);
-    // Reset input so same file can be re-picked
     input.value = '';
   }
 
-  // ── Conversion ───────────────────────────────────────────────────────────────
+  function buildPreviewTiles(previewData: Uint8ClampedArray): PreviewTile[] {
+    if (!croppedImageData) return [];
+
+    const tiles: PreviewTile[] = [];
+    const totalWidth = croppedImageData.width;
+
+    for (let row = 0; row < mapHeight; row += 1) {
+      for (let col = 0; col < mapWidth; col += 1) {
+        const tilePixels = new Uint8ClampedArray(128 * 128 * 4);
+        for (let y = 0; y < 128; y += 1) {
+          const start = ((row * 128 + y) * totalWidth + col * 128) * 4;
+          tilePixels.set(previewData.slice(start, start + 128 * 4), y * 128 * 4);
+        }
+        tiles.push({ row, col, imageData: new ImageData(tilePixels, 128, 128) });
+      }
+    }
+
+    return tiles;
+  }
+
+  async function drawPreviewTilesToCanvases() {
+    await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+    previewTiles.forEach((tile, index) => {
+      const canvas = previewCanvases[index];
+      if (!canvas) return;
+      canvas.width = 128;
+      canvas.height = 128;
+      canvas.getContext('2d')?.putImageData(tile.imageData, 0, 0);
+    });
+  }
 
   async function convert() {
-    if (!croppedImageData) return;
+    if (!croppedImageData || !colourSets.some((colour) => colour.enabled)) return;
 
     isConverting = true;
+    isRenderQueued = false;
     progress = 0;
-    resultPixels = [];
-    materials = {};
 
     worker?.terminate();
-    worker = new Worker(
-      new URL('$lib/workers/converter.worker.ts', import.meta.url),
-      { type: 'module' }
-    );
+    worker = new Worker(new URL('$lib/workers/converter.worker.ts', import.meta.url), { type: 'module' });
 
-    worker.onmessage = async (e) => {
-      const data = e.data;
+    worker.onmessage = async (event) => {
+      const data = event.data;
       if (data.type === 'progress') {
         progress = data.progress;
-      } else if (data.type === 'done') {
-        resultPixels = data.pixels;
-        materials = data.materials;
-        progress = 100;
-        isConverting = false;
-
-        // Wait for Svelte to render the canvas (it's inside {#if resultPixels.length})
-        await tick();
-
-        if (resultCanvas) {
-          const rctx = resultCanvas.getContext('2d')!;
-          resultCanvas.width  = croppedImageData!.width;
-          resultCanvas.height = croppedImageData!.height;
-          const previewImg = rctx.createImageData(resultCanvas.width, resultCanvas.height);
-          previewImg.data.set(data.previewData);
-          rctx.putImageData(previewImg, 0, 0);
-        }
+        return;
       }
-    };
 
-    worker.onerror = (e) => {
-      console.error('Worker error:', e);
+      resultPixels = data.pixels;
+      materials = data.materials;
+      previewTiles = buildPreviewTiles(data.previewData);
+      progress = 100;
       isConverting = false;
+      await drawPreviewTilesToCanvases();
     };
 
-    // Apply preprocessing before sending to worker
-    const adv = $advancedSettings;
-    const processedData = preprocessImageData(croppedImageData, adv.saturationBoost, adv.brightness);
+    worker.onerror = (event) => {
+      console.error('Worker error:', event);
+      isConverting = false;
+      isRenderQueued = false;
+    };
+
+    const advanced = $advancedSettings;
+    const processedData = preprocessImageData(croppedImageData, advanced.saturationBoost, advanced.brightness);
 
     worker.postMessage({
       type: 'convert',
       imageData: processedData.data,
-      width:  processedData.width,
+      width: processedData.width,
       height: processedData.height,
       options: {
         version,
         staircaseMode,
         ditherMethod,
-        enabledColourIds: colourSets.filter((c) => c.enabled).map((c) => c.id),
+        enabledColourIds: colourSets.filter((colour) => colour.enabled).map((colour) => colour.id),
         selectedVariants: $selectedVariants,
         advanced: {
-          colorSpace:          adv.colorSpace,
-          labLWeight:          adv.labLWeight,
-          labAWeight:          adv.labAWeight,
-          labBWeight:          adv.labBWeight,
-          ditherStrength:      adv.ditherStrength,
-          blueNoiseThreshold:  adv.blueNoiseThreshold,
-        },
+          colorSpace: advanced.colorSpace,
+          labLWeight: advanced.labLWeight,
+          labAWeight: advanced.labAWeight,
+          labBWeight: advanced.labBWeight,
+          ditherStrength: advanced.ditherStrength,
+          blueNoiseThreshold: advanced.blueNoiseThreshold
+        }
       },
-      coloursJSON,
+      coloursJSON
     });
   }
 
-  // ── Export ───────────────────────────────────────────────────────────────────
-
   function downloadBlob(data: Uint8Array, filename: string) {
-    const blob = new Blob([data], { type: 'application/octet-stream' });
+    const bytes = new Uint8Array(data);
+    const buffer = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
+    const blob = new Blob([buffer], { type: 'application/octet-stream' });
     const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url; a.download = filename; a.click();
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = filename;
+    link.click();
     URL.revokeObjectURL(url);
   }
 
   function exportSchem() {
-    exportSchemNamed();
+    if (!resultPixels.length) return;
+    const name = $advancedSettings.schematicName || 'mapforge_export';
+    const raw = coloursJSON as Parameters<typeof generateSchem>[2];
+    downloadBlob(generateSchem(resultPixels as Parameters<typeof generateSchem>[0], version, raw), `${name}.schem`);
   }
 
   function exportLitematic() {
@@ -336,69 +353,88 @@
     downloadBlob(generateLitematic(resultPixels as Parameters<typeof generateLitematic>[0], version, name, raw), `${name}.litematic`);
   }
 
-  function exportSchemNamed() {
-    if (!resultPixels.length) return;
-    const name = $advancedSettings.schematicName || 'mapforge_export';
-    const raw = coloursJSON as Parameters<typeof generateSchem>[2];
-    downloadBlob(generateSchem(resultPixels as Parameters<typeof generateSchem>[0], version, raw), `${name}.schem`);
+  function sliceMapPixels(row: number, col: number): MapPixelResult[][] {
+    return resultPixels.slice(row * 128, (row + 1) * 128).map((line) => line.slice(col * 128, (col + 1) * 128));
   }
 
-  // ── Derived ───────────────────────────────────────────────────────────────────
+  async function exportIndividualMaps() {
+    if (!resultPixels.length) return;
+
+    const schemRaw = coloursJSON as Parameters<typeof generateSchem>[2];
+
+    for (let row = 0; row < mapHeight; row += 1) {
+      for (let col = 0; col < mapWidth; col += 1) {
+        const tile = sliceMapPixels(row, col);
+        const baseName = `map_r${row}_c${col}`;
+        downloadBlob(generateSchem(tile as Parameters<typeof generateSchem>[0], version, schemRaw), `${baseName}.schem`);
+        await new Promise((resolve) => setTimeout(resolve, 300));
+      }
+    }
+  }
 
   $: stackCount = (count: number) => `${Math.floor(count / 64)}×64 + ${count % 64}`;
   $: sortedMaterials = Object.entries(materials).sort((a, b) => b[1] - a[1]);
-  $: canGenerate = !!croppedImageData && !isConverting && colourSets.some((c) => c.enabled);
-  $: previewW = (croppedImageData?.width  ?? 128) * previewScale;
-  $: previewH = (croppedImageData?.height ?? 128) * previewScale;
+  $: totalMaterials = sortedMaterials.reduce((sum, [, count]) => sum + count, 0);
+  $: previewCells = Array.from({ length: mapWidth * mapHeight }, (_, index) => ({ row: Math.floor(index / mapWidth), col: index % mapWidth }));
+  $: previewTileSize = 128 * previewScale;
+  $: hasEnabledColours = colourSets.some((colour) => colour.enabled);
+  $: isRendering = isRenderQueued || isConverting;
+  $: renderSignature = croppedImageData
+    ? JSON.stringify({
+        mapWidth,
+        mapHeight,
+        version,
+        staircaseMode,
+        ditherMethod,
+        enabledColourIds: colourSets.filter((colour) => colour.enabled).map((colour) => colour.id),
+        selectedVariants: $selectedVariants,
+        advanced: {
+          colorSpace: $advancedSettings.colorSpace,
+          labLWeight: $advancedSettings.labLWeight,
+          labAWeight: $advancedSettings.labAWeight,
+          labBWeight: $advancedSettings.labBWeight,
+          ditherStrength: $advancedSettings.ditherStrength,
+          blueNoiseThreshold: $advancedSettings.blueNoiseThreshold,
+          saturationBoost: $advancedSettings.saturationBoost,
+          brightness: $advancedSettings.brightness
+        },
+        width: croppedImageData.width,
+        height: croppedImageData.height
+      })
+    : '';
+
+  $: if (renderSignature && hasEnabledColours) {
+    worker?.terminate();
+    worker = null;
+    isConverting = false;
+    isRenderQueued = true;
+    progress = 0;
+    if (renderDebounce) clearTimeout(renderDebounce);
+    renderDebounce = setTimeout(() => {
+      renderDebounce = null;
+      void convert();
+    }, 800);
+  } else {
+    if (renderDebounce) clearTimeout(renderDebounce);
+    renderDebounce = null;
+    isRenderQueued = false;
+
+    if (!hasEnabledColours || !imageFile) {
+      resultPixels = [];
+      materials = {};
+      previewTiles = [];
+    }
+  }
+
+  $: if (previewTiles.length) {
+    void drawPreviewTilesToCanvases();
+  }
 </script>
+
 
 <svelte:head>
   <title>MapForge — Minecraft Map Art Generator</title>
 </svelte:head>
-
-<!-- ── Crop modal ─────────────────────────────────────────────────────────── -->
-{#if showCropModal && pendingFile}
-  <div class="modal-overlay" on:click|self={onCropCancel}>
-    <div class="modal-box">
-
-      <!-- Map size selector inside modal -->
-      <div class="modal-header">
-        <h2 class="modal-title">✂️ {$t.crop}</h2>
-        <div class="map-size-row">
-          <span class="setting-label">{$t.mapSize}</span>
-          <Tooltip text={$t.tooltips.mapSize} position="bottom" />
-          <div class="preset-grid">
-            {#each MAP_PRESETS as [pw, ph]}
-              <button
-                class="preset-btn"
-                class:active={mapWidth === pw && mapHeight === ph}
-                on:click={() => { mapWidth = pw; mapHeight = ph; }}
-              >{pw}×{ph}</button>
-            {/each}
-          </div>
-          <div class="custom-size">
-            <select bind:value={mapWidth}  class="size-select">
-              {#each Array.from({length: 8}, (_, i) => i + 1) as n}<option value={n}>{n}</option>{/each}
-            </select>
-            <span class="size-sep">×</span>
-            <select bind:value={mapHeight} class="size-select">
-              {#each Array.from({length: 8}, (_, i) => i + 1) as n}<option value={n}>{n}</option>{/each}
-            </select>
-          </div>
-        </div>
-      </div>
-
-      <ImageCropper
-        imageFile={pendingFile}
-        {mapWidth}
-        {mapHeight}
-        resizeFilter={$advancedSettings.resizeFilter}
-        on:crop={onCrop}
-        on:cancel={onCropCancel}
-      />
-    </div>
-  </div>
-{/if}
 
 <div class="app">
   <!-- ── Top navbar ─────────────────────────────────────────────────────── -->
@@ -731,91 +767,135 @@
 
     <!-- ── Center panel ──────────────────────────────────────────────── -->
     <main class="center-panel">
+      <section class="workspace-section">
+        <div class="workspace-toolbar">
+          <div class="workspace-toolbar-block">
+            <div class="workspace-title-row">
+              <h3 class="workspace-title">Image Workspace</h3>
+              <span class="workspace-subtitle">Drag to move · resize with 8 handles · auto-renders after 800ms</span>
+            </div>
+            <div class="preset-grid">
+              {#each MAP_PRESETS as [pw, ph]}
+                <button
+                  class="preset-btn"
+                  class:active={mapWidth === pw && mapHeight === ph}
+                  on:click={() => { mapWidth = pw; mapHeight = ph; }}
+                >{pw}×{ph}</button>
+              {/each}
+            </div>
+          </div>
 
-      <!-- Drop zone (no image loaded) -->
-      {#if !croppedImageData}
-        <!-- svelte-ignore a11y-no-static-element-interactions -->
-        <div
-          class="dropzone"
-          class:drag-over={isDragOver}
-          on:dragover|preventDefault={() => (isDragOver = true)}
-          on:dragleave={() => (isDragOver = false)}
-          on:drop={onDrop}
-        >
-          <div class="drop-prompt">
-            <div class="drop-icon">📁</div>
-            <p>{$t.upload}</p>
-            <label class="file-btn">
-              Browse file
+          <div class="workspace-toolbar-block compact">
+            <div class="custom-size-row inline">
+              <select bind:value={mapWidth} class="size-select">
+                {#each Array.from({ length: 8 }, (_, i) => i + 1) as n}
+                  <option value={n}>{n}</option>
+                {/each}
+              </select>
+              <span class="size-sep">×</span>
+              <select bind:value={mapHeight} class="size-select">
+                {#each Array.from({ length: 8 }, (_, i) => i + 1) as n}
+                  <option value={n}>{n}</option>
+                {/each}
+              </select>
+            </div>
+            <label class="file-btn small">
+              {imageFile ? $t.changeImage : 'Browse file'}
               <input type="file" accept="image/*" on:change={onFileInput} class="hidden-input" />
             </label>
           </div>
         </div>
-      {:else}
 
-        <!-- Image loaded — show change button + map info -->
-        <div class="image-bar">
-          <span class="image-info">
-            🗺️ {mapWidth}×{mapHeight} map{mapWidth * mapHeight > 1 ? 's' : ''}
-            &nbsp;({croppedImageData.width}×{croppedImageData.height}px)
-          </span>
-          <label class="file-btn small">
-            {$t.changeImage}
-            <input type="file" accept="image/*" on:change={onFileInput} class="hidden-input" />
-          </label>
-        </div>
+        {#if !imageFile}
+          <!-- svelte-ignore a11y-no-static-element-interactions -->
+          <div
+            class="dropzone"
+            class:drag-over={isDragOver}
+            on:dragover|preventDefault={() => (isDragOver = true)}
+            on:dragleave={() => (isDragOver = false)}
+            on:drop={onDrop}
+          >
+            <div class="drop-prompt">
+              <div class="drop-icon">📁</div>
+              <p>{$t.upload}</p>
+              <span class="drop-hint">Drop image here or click to upload</span>
+            </div>
+          </div>
+        {:else}
+          <InlineWorkspace
+            imageFile={imageFile}
+            {mapWidth}
+            {mapHeight}
+            resizeFilter={$advancedSettings.resizeFilter}
+            on:crop={onCrop}
+          />
 
-        <!-- Scale controls -->
-        <div class="scale-controls">
-          <span class="setting-label">{$t.zoom}</span>
-          {#each scales as s}
-            <button
-              class="scale-btn"
-              class:active={previewScale === s}
-              on:click={() => (previewScale = s)}
-            >{s}×</button>
-          {/each}
-        </div>
+          <div class="workspace-meta">
+            <span>{imageFileName} · target {mapWidth * 128}×{mapHeight * 128}px</span>
+            {#if croppedImageData}
+              <span>Output {croppedImageData.width}×{croppedImageData.height}px · row-major export order</span>
+            {/if}
+          </div>
+        {/if}
+      </section>
 
-        <!-- Canvases -->
-        <div class="canvases">
-          <div class="canvas-wrapper">
-            <p class="canvas-label">{$t.original}</p>
-            <canvas
-              bind:this={originalCanvas}
-              style="width:{previewW}px; height:{previewH}px; image-rendering:pixelated"
-            ></canvas>
+      {#if imageFile}
+        <section class="preview-section">
+          <div class="preview-section-header">
+            <div>
+              <h3 class="workspace-title">Preview</h3>
+              <div class="workspace-subtitle">{mapWidth}×{mapHeight} maps · row-major export order</div>
+            </div>
+
+            <div class="scale-controls">
+              <span class="setting-label">{$t.zoom}</span>
+              {#each scales as s}
+                <button
+                  class="scale-btn"
+                  class:active={previewScale === s}
+                  on:click={() => (previewScale = s)}
+                >{s}×</button>
+              {/each}
+            </div>
           </div>
 
-          <div class="canvas-wrapper">
-            <p class="canvas-label">{$t.result}</p>
-            {#if resultPixels.length}
-              <canvas
-                bind:this={resultCanvas}
-                style="width:{previewW}px; height:{previewH}px; image-rendering:pixelated"
-              ></canvas>
-            {:else}
-              <div
-                class="canvas-placeholder"
-                style="width:{previewW}px; height:{previewH}px"
-              >
-                {isConverting ? `⏳ ${$t.generating}` : '← ' + $t.generate}
+          <div class="preview-grid-area">
+            <div class="preview-grid" style={`grid-template-columns: repeat(${mapWidth}, max-content);`}>
+              {#each previewCells as cell, index}
+                <div class="preview-card">
+                  <div class="preview-card-label">Map [{cell.row},{cell.col}]</div>
+                  {#if previewTiles[index]}
+                    <canvas
+                      bind:this={previewCanvases[index]}
+                      class="preview-tile-canvas"
+                      style={`width:${previewTileSize}px; height:${previewTileSize}px; image-rendering:pixelated;`}
+                    ></canvas>
+                  {:else}
+                    <div class="preview-placeholder" style={`width:${previewTileSize}px; height:${previewTileSize}px;`}>
+                      Waiting for render…
+                    </div>
+                  {/if}
+                </div>
+              {/each}
+            </div>
+
+            {#if isRendering}
+              <div class="preview-loading-overlay">
+                <div class="preview-loading-card">
+                  <div class="spinner"></div>
+                  <div class="preview-loading-text">Rendering…</div>
+                </div>
               </div>
             {/if}
           </div>
-        </div>
 
-        <!-- Progress bar -->
-        {#if isConverting}
-          <div class="progress-bar-wrap">
-            <div class="progress-bar" style="width:{progress}%"></div>
-            <span class="progress-text">{progress}%</span>
-          </div>
-        {/if}
-
-        <button class="generate-btn" on:click={convert} disabled={!canGenerate}>
-          {isConverting ? `⏳ ${$t.generating} ${progress}%` : `⚡ ${$t.generate}`}
-        </button>
+          {#if isRendering}
+            <div class="progress-bar-wrap">
+              <div class="progress-bar" style="width:{progress}%"></div>
+              <span class="progress-text">{isConverting ? `${progress}%` : 'Queued…'}</span>
+            </div>
+          {/if}
+        </section>
       {/if}
     </main>
 
@@ -825,18 +905,37 @@
         <h2>Export</h2>
       </div>
 
-      <div class="export-btns">
-        <button class="export-btn" on:click={exportSchem} disabled={!resultPixels.length}>
-          📦 {$t.exportSchem}
-        </button>
-        <button class="export-btn" on:click={exportLitematic} disabled={!resultPixels.length}>
-          🗺️ {$t.exportLitematic}
-        </button>
-      </div>
+      {#if mapWidth * mapHeight > 1}
+        <div class="export-groups">
+          <div class="export-group">
+            <div class="export-group-title">Schem</div>
+            <div class="export-btns dual">
+              <button class="export-btn" on:click={exportSchem} disabled={!resultPixels.length}>📦 {$t.exportAll}</button>
+              <button class="export-btn secondary" on:click={exportIndividualMaps} disabled={!resultPixels.length}>🧩 {$t.exportIndividual}</button>
+            </div>
+          </div>
+
+          <div class="export-group">
+            <div class="export-group-title">Litematic</div>
+            <div class="export-btns">
+              <button class="export-btn" on:click={exportLitematic} disabled={!resultPixels.length}>🗺️ {$t.exportLitematic}</button>
+            </div>
+          </div>
+        </div>
+      {:else}
+        <div class="export-btns">
+          <button class="export-btn" on:click={exportSchem} disabled={!resultPixels.length}>
+            📦 {$t.exportSchem}
+          </button>
+          <button class="export-btn" on:click={exportLitematic} disabled={!resultPixels.length}>
+            🗺️ {$t.exportLitematic}
+          </button>
+        </div>
+      {/if}
 
       {#if sortedMaterials.length > 0}
         <div class="materials-section">
-          <h3 class="materials-title">{$t.materials} ({sortedMaterials.length})</h3>
+          <h3 class="materials-title">{$t.materials} ({sortedMaterials.length} types · {totalMaterials} total)</h3>
           <div class="materials-table-wrap">
             <table class="materials-table">
               <thead>
@@ -858,6 +957,8 @@
             </table>
           </div>
         </div>
+      {:else if imageFile && isRendering}
+        <p class="no-materials">Rendering materials…</p>
       {:else}
         <p class="no-materials">{$t.noImage}</p>
       {/if}
@@ -1209,55 +1310,6 @@
     cursor: pointer;
   }
 
-  /* ── Modal ─────────────────────────────────────── */
-
-  .modal-overlay {
-    position: fixed;
-    inset: 0;
-    background: rgba(0,0,0,0.7);
-    z-index: 1000;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    padding: 20px;
-  }
-
-  .modal-box {
-    background: var(--surface);
-    border: 1px solid var(--border);
-    border-radius: 12px;
-    padding: 20px;
-    max-width: 680px;
-    width: 100%;
-    max-height: 90vh;
-    overflow-y: auto;
-    display: flex;
-    flex-direction: column;
-    gap: 14px;
-  }
-
-  .modal-header {
-    display: flex;
-    flex-wrap: wrap;
-    align-items: center;
-    gap: 12px;
-  }
-
-  .modal-title {
-    font-size: 16px;
-    font-weight: 700;
-    flex-shrink: 0;
-  }
-
-  .map-size-row {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    flex-wrap: wrap;
-  }
-
-  .map-size-row .setting-label { margin-bottom: 0; }
-
   .preset-grid {
     display: flex;
     gap: 4px;
@@ -1279,12 +1331,6 @@
     background: var(--accent);
     border-color: var(--accent);
     color: #fff;
-  }
-
-  .custom-size {
-    display: flex;
-    align-items: center;
-    gap: 4px;
   }
 
   .size-select {
@@ -1342,21 +1388,6 @@
 
   .drop-icon { font-size: 36px; }
 
-  .image-bar {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    background: var(--surface);
-    border: 1px solid var(--border);
-    border-radius: var(--radius);
-    padding: 8px 14px;
-  }
-
-  .image-info {
-    font-size: 12px;
-    color: var(--text-muted);
-  }
-
   .file-btn {
     display: inline-block;
     background: var(--accent);
@@ -1398,44 +1429,11 @@
     color: #fff;
   }
 
-  .canvases {
-    display: flex;
-    gap: 20px;
-    flex-wrap: wrap;
-  }
-
-  .canvas-wrapper {
-    display: flex;
-    flex-direction: column;
-    gap: 6px;
-  }
-
-  .canvas-label {
-    font-size: 10px;
-    font-weight: 700;
-    text-transform: uppercase;
-    letter-spacing: 0.08em;
-    color: var(--text-muted);
-  }
-
   canvas {
     display: block;
     image-rendering: pixelated;
     border: 1px solid var(--border);
     border-radius: 4px;
-  }
-
-  .canvas-placeholder {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    background: var(--surface);
-    border: 1px dashed var(--border);
-    border-radius: 4px;
-    color: var(--text-muted);
-    font-size: 13px;
-    min-width: 128px;
-    min-height: 128px;
   }
 
   /* Progress */
@@ -1461,23 +1459,6 @@
     right: 0;
     top: -16px;
   }
-
-  /* Generate button */
-  .generate-btn {
-    align-self: flex-start;
-    background: var(--green);
-    color: #fff;
-    border: none;
-    padding: 10px 24px;
-    border-radius: var(--radius);
-    font-size: 14px;
-    font-weight: 600;
-    cursor: pointer;
-    transition: opacity 0.15s;
-  }
-
-  .generate-btn:hover:not(:disabled) { opacity: 0.85; }
-  .generate-btn:disabled { opacity: 0.45; cursor: not-allowed; }
 
   /* ── Right panel ────────────────────────────────── */
 
@@ -1773,4 +1754,175 @@
   }
 
   .star-bar a:hover { color: var(--text); }
+
+  .workspace-section,
+  .preview-section {
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+    padding: 18px;
+    background: rgba(15, 23, 42, 0.55);
+    border: 1px solid rgba(148, 163, 184, 0.16);
+    border-radius: 16px;
+  }
+
+  .center-panel {
+    display: flex;
+    flex-direction: column;
+    gap: 18px;
+  }
+
+  .workspace-toolbar,
+  .preview-section-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    gap: 16px;
+    flex-wrap: wrap;
+  }
+
+  .workspace-toolbar-block {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+  }
+
+  .workspace-toolbar-block.compact {
+    align-items: flex-end;
+  }
+
+  .workspace-title-row {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+
+  .workspace-title {
+    margin: 0;
+    font-size: 18px;
+    color: #f8fafc;
+  }
+
+  .workspace-subtitle,
+  .workspace-meta,
+  .drop-hint,
+  .export-group-title {
+    color: #94a3b8;
+    font-size: 13px;
+  }
+
+  .workspace-meta {
+    display: flex;
+    justify-content: space-between;
+    gap: 12px;
+    flex-wrap: wrap;
+  }
+
+  .custom-size-row.inline {
+    margin-top: 0;
+  }
+
+  .preview-grid-area {
+    position: relative;
+    overflow-x: auto;
+    padding-bottom: 4px;
+  }
+
+  .preview-grid {
+    display: grid;
+    gap: 12px;
+    width: max-content;
+    min-width: 100%;
+  }
+
+  .preview-card {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+
+  .preview-card-label {
+    font-size: 12px;
+    color: #cbd5e1;
+    text-align: center;
+  }
+
+  .preview-tile-canvas,
+  .preview-placeholder {
+    border-radius: 10px;
+    border: 1px solid rgba(148, 163, 184, 0.2);
+    background: rgba(15, 23, 42, 0.9);
+  }
+
+  .preview-placeholder {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: #94a3b8;
+    font-size: 12px;
+  }
+
+  .preview-loading-overlay {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: rgba(15, 23, 42, 0.48);
+    border-radius: 14px;
+    pointer-events: none;
+  }
+
+  .preview-loading-card {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 10px;
+    padding: 16px 20px;
+    border-radius: 14px;
+    background: rgba(15, 23, 42, 0.88);
+    color: #f8fafc;
+    box-shadow: 0 12px 30px rgba(15, 23, 42, 0.25);
+  }
+
+  .preview-loading-text {
+    font-size: 14px;
+    font-weight: 600;
+  }
+
+  .spinner {
+    width: 28px;
+    height: 28px;
+    border-radius: 999px;
+    border: 3px solid rgba(148, 163, 184, 0.25);
+    border-top-color: #38bdf8;
+    animation: spin 0.9s linear infinite;
+  }
+
+  .export-groups {
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+  }
+
+  .export-group {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+
+  .export-btns.dual {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .export-btn.secondary {
+    background: rgba(30, 41, 59, 0.92);
+  }
+
+  @keyframes spin {
+    from { transform: rotate(0deg); }
+    to { transform: rotate(360deg); }
+  }
+
 </style>

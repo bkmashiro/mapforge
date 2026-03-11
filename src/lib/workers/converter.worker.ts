@@ -762,5 +762,5 @@ self.onmessage = (event: MessageEvent<WorkerInput>) => {
   );
 
   const out: WorkerOutput = { type: 'done', pixels: pixels2D, materials, previewData };
-  self.postMessage(out, [previewData.buffer]);
+  self.postMessage(out);
 };
