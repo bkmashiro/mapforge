@@ -29,7 +29,7 @@ export type McVersion = '1.20' | '1.19' | '1.18.2' | '1.17.1' | '1.16.5';
 
 export type StaircaseMode = 'flat' | 'staircase';
 
-export type DitherMethod = 'none' | 'floyd-steinberg' | 'ordered';
+export type DitherMethod = 'none' | 'atkinson' | 'floyd-steinberg' | 'blue-noise';
 
 export interface GeneratorOptions {
   version: McVersion;
