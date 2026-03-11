@@ -23,6 +23,8 @@
 
 *Upload any image → crop to map grid → export `.schem` or `.litematic`. Done.*
 
+<sub>Demo image: <a href="https://zh.moegirl.org.cn/File:Hazard_Creeper.png">Hazard Creeper</a> via moegirl.org.cn</sub>
+
 </div>
 
 ---
