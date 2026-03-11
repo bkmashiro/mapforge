@@ -22,61 +22,26 @@
   let selection: SelectionRect | null = null;
   let cropCanvas: HTMLCanvasElement | null = null;
   let debounceTimer: ReturnType<typeof setTimeout> | null = null;
+  let renderTimeout: ReturnType<typeof setTimeout> | null = null;
   let lastLoadedFile: File | null = null;
-  let lastMapKey = '1x1';
   let isRendering = false;
 
   $: if (imageFile !== lastLoadedFile) {
     void loadImageFile(imageFile);
   }
 
-  $: if (image) {
-    const nextMapKey = `${mapWidth}x${mapHeight}`;
-    if (nextMapKey !== lastMapKey) {
-      lastMapKey = nextMapKey;
-      selection = createDefaultSelection(image, mapWidth, mapHeight);
-      scheduleCrop();
-    }
-  }
-
+  // Trigger crop whenever selection, resizeFilter, or map dims change
   $: if (image && selection) {
     resizeFilter;
+    mapWidth;
+    mapHeight;
     scheduleCrop();
   }
 
   onDestroy(() => {
     if (debounceTimer) clearTimeout(debounceTimer);
+    if (renderTimeout) clearTimeout(renderTimeout);
   });
-
-  function createDefaultSelection(source: HTMLImageElement, widthMaps: number, heightMaps: number): SelectionRect {
-    const baseWidth = widthMaps * 128;
-    const baseHeight = heightMaps * 128;
-    const snappedUnits = Math.floor(Math.min(source.width / baseWidth, source.height / baseHeight));
-
-    if (snappedUnits >= 1) {
-      const width = baseWidth * snappedUnits;
-      const height = baseHeight * snappedUnits;
-      const x = Math.max(0, Math.round(((source.width - width) / 2) / 128) * 128);
-      const y = Math.max(0, Math.round(((source.height - height) / 2) / 128) * 128);
-      return { x, y, width, height };
-    }
-
-    const aspect = widthMaps / heightMaps;
-    let width = source.width;
-    let height = width / aspect;
-
-    if (height > source.height) {
-      height = source.height;
-      width = height * aspect;
-    }
-
-    return {
-      x: Math.round((source.width - width) / 2),
-      y: Math.round((source.height - height) / 2),
-      width: Math.round(width),
-      height: Math.round(height)
-    };
-  }
 
   async function loadImageFile(file: File | null) {
     lastLoadedFile = file;
@@ -84,10 +49,8 @@
     selection = null;
     isRendering = false;
 
-    if (debounceTimer) {
-      clearTimeout(debounceTimer);
-      debounceTimer = null;
-    }
+    if (debounceTimer) { clearTimeout(debounceTimer); debounceTimer = null; }
+    if (renderTimeout) { clearTimeout(renderTimeout); renderTimeout = null; }
 
     if (!file) return;
 
@@ -102,11 +65,8 @@
       });
 
       if (lastLoadedFile !== file) return;
-
       image = nextImage;
-      lastMapKey = `${mapWidth}x${mapHeight}`;
-      selection = createDefaultSelection(nextImage, mapWidth, mapHeight);
-      scheduleCrop();
+      // InlineCropWorkspace will emit the initial selection via selectionChange
     } catch (error) {
       console.error('Failed to load image:', error);
     } finally {
@@ -137,25 +97,40 @@
   function scheduleCrop() {
     if (!image || !selection) return;
     if (debounceTimer) clearTimeout(debounceTimer);
+    if (renderTimeout) clearTimeout(renderTimeout);
+
     isRendering = true;
+
+    // Safety fallback: force clear rendering after 5 s
+    renderTimeout = setTimeout(() => {
+      renderTimeout = null;
+      isRendering = false;
+    }, 5000);
+
     debounceTimer = setTimeout(() => {
       debounceTimer = null;
+      try {
+        const data = extractCroppedImageData(image!, selection!);
+        dispatch('crop', { croppedImageData: data });
+      } catch (e) {
+        console.error('Crop extraction failed:', e);
+      }
       isRendering = false;
-      dispatch('crop', { croppedImageData: extractCroppedImageData(image!, selection!) });
+      if (renderTimeout) { clearTimeout(renderTimeout); renderTimeout = null; }
     }, 800);
   }
 
   function onSelectionChange(event: CustomEvent<SelectionRect>) {
     selection = event.detail;
-    scheduleCrop();
+    // Reactive block ($: if (image && selection)) will call scheduleCrop
   }
 </script>
 
 <div class="inline-workspace-shell">
   {#if image}
-    <InlineCropWorkspace image={image} {mapWidth} {mapHeight} {selection} on:selectionChange={onSelectionChange} />
+    <InlineCropWorkspace {image} {mapWidth} {mapHeight} on:selectionChange={onSelectionChange} />
     {#if isRendering}
-      <div class="render-badge">🔄 Rendering...</div>
+      <div class="render-badge">Rendering...</div>
     {/if}
   {/if}
 </div>

@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { createEventDispatcher, onMount } from 'svelte';
+  import { createEventDispatcher, onMount, onDestroy, tick } from 'svelte';
 
   interface SelectionRect {
     x: number;
@@ -11,333 +11,272 @@
   export let image: HTMLImageElement | null = null;
   export let mapWidth = 1;
   export let mapHeight = 1;
-  export let selection: SelectionRect | null = null;
 
   const dispatch = createEventDispatcher<{ selectionChange: SelectionRect }>();
 
-  let canvas: HTMLCanvasElement;
-  let context: CanvasRenderingContext2D | null = null;
+  let container: HTMLDivElement;
+  let containerW = 600;
+  let containerH = 400;
 
-  const CANVAS_WIDTH = 960;
-  const CANVAS_HEIGHT = 540;
-  const HANDLE_SIZE = 8;
-  const SNAP_STEP = 128;
+  // Image transform: screen = imgOffset + imgCoord * imgScale
+  let imgScale = 1;
+  let imgOffsetX = 0;
+  let imgOffsetY = 0;
 
-  type Handle = 'move' | 'n' | 's' | 'e' | 'w' | 'nw' | 'ne' | 'sw' | 'se' | 'none';
+  // Selection box — fixed screen-pixel size, movable
+  const SEL_W = 240;
+  $: selH = SEL_W * (mapHeight / mapWidth);
+  let selX = 0;
+  let selY = 0;
 
-  let displayX = 0;
-  let displayY = 0;
-  let displayWidth = 0;
-  let displayHeight = 0;
-  let scale = 1;
+  // Drag state
+  let dragMode: 'none' | 'sel' | 'pan' = 'none';
+  let dragOriginX = 0;
+  let dragOriginY = 0;
+  let dragStartVal1 = 0;
+  let dragStartVal2 = 0;
 
-  let activeHandle: Handle = 'none';
-  let dragStartMouseX = 0;
-  let dragStartMouseY = 0;
-  let dragStartSelection: SelectionRect | null = null;
+  let initialized = false;
+  let prevImageSrc = '';
+
+  // ResizeObserver
+  let resizeObserver: ResizeObserver | null = null;
 
   onMount(() => {
-    context = canvas.getContext('2d');
-    draw();
+    resizeObserver = new ResizeObserver((entries) => {
+      for (const entry of entries) {
+        containerW = entry.contentRect.width || 600;
+        containerH = entry.contentRect.height || 400;
+      }
+    });
+    if (container) resizeObserver.observe(container);
   });
 
-  $: if (context) {
-    draw();
+  onDestroy(() => {
+    resizeObserver?.disconnect();
+  });
+
+  function screenToImage(sx: number, sy: number) {
+    return {
+      x: (sx - imgOffsetX) / imgScale,
+      y: (sy - imgOffsetY) / imgScale,
+    };
   }
 
-  function computeDisplayRect() {
+  function emitSelection() {
+    if (!image) return;
+    const tl = screenToImage(selX, selY);
+    const w = SEL_W / imgScale;
+    const h = selH / imgScale;
+
+    dispatch('selectionChange', {
+      x: Math.max(0, Math.round(tl.x)),
+      y: Math.max(0, Math.round(tl.y)),
+      width: Math.max(1, Math.round(w)),
+      height: Math.max(1, Math.round(h)),
+    });
+  }
+
+  function initView() {
+    if (!image || !container) return;
+    const rect = container.getBoundingClientRect();
+    containerW = rect.width || 600;
+    containerH = rect.height || 400;
+
+    const sx = containerW / image.width;
+    const sy = containerH / image.height;
+    imgScale = Math.min(sx, sy) * 0.88;
+    imgOffsetX = (containerW - image.width * imgScale) / 2;
+    imgOffsetY = (containerH - image.height * imgScale) / 2;
+
+    selX = (containerW - SEL_W) / 2;
+    selY = (containerH - selH) / 2;
+
+    initialized = true;
+    emitSelection();
+  }
+
+  // Re-init when image source changes
+  $: if (image) {
+    const src = image.src;
+    if (src !== prevImageSrc) {
+      prevImageSrc = src;
+      initialized = false;
+      tick().then(() => initView());
+    }
+  }
+
+  // Update selection when map aspect changes
+  let prevMapKey = '';
+  $: {
+    const key = `${mapWidth}x${mapHeight}`;
+    if (initialized && key !== prevMapKey) {
+      prevMapKey = key;
+      selX = (containerW - SEL_W) / 2;
+      selY = (containerH - selH) / 2;
+      emitSelection();
+    }
+  }
+
+  // ── Zoom (scroll wheel, centered on mouse) ──────────────────────────
+  function handleWheel(e: WheelEvent) {
+    e.preventDefault();
     if (!image) return;
 
-    const scaleX = CANVAS_WIDTH / image.width;
-    const scaleY = CANVAS_HEIGHT / image.height;
-    scale = Math.min(scaleX, scaleY);
-    displayWidth = image.width * scale;
-    displayHeight = image.height * scale;
-    displayX = (CANVAS_WIDTH - displayWidth) / 2;
-    displayY = (CANVAS_HEIGHT - displayHeight) / 2;
+    const rect = container.getBoundingClientRect();
+    const mx = e.clientX - rect.left;
+    const my = e.clientY - rect.top;
+
+    const factor = e.deltaY > 0 ? 0.92 : 1 / 0.92;
+    const newScale = Math.max(0.005, Math.min(80, imgScale * factor));
+
+    // Zoom towards mouse position
+    imgOffsetX = mx - (mx - imgOffsetX) * (newScale / imgScale);
+    imgOffsetY = my - (my - imgOffsetY) * (newScale / imgScale);
+    imgScale = newScale;
+
+    emitSelection();
   }
 
-  function supportsSnap() {
-    if (!image) return false;
-    return image.width >= mapWidth * SNAP_STEP && image.height >= mapHeight * SNAP_STEP;
-  }
-
-  function clampSelection(rect: SelectionRect): SelectionRect {
-    if (!image) return rect;
-
-    const aspect = mapWidth / mapHeight;
-    let width = Math.max(16, rect.width);
-    let height = width / aspect;
-
-    if (height > image.height) {
-      height = image.height;
-      width = height * aspect;
-    }
-
-    if (width > image.width) {
-      width = image.width;
-      height = width / aspect;
-    }
-
-    let x = rect.x;
-    let y = rect.y;
-
-    if (supportsSnap()) {
-      const baseWidth = mapWidth * SNAP_STEP;
-      const baseHeight = mapHeight * SNAP_STEP;
-      const maxUnits = Math.max(1, Math.floor(Math.min(image.width / baseWidth, image.height / baseHeight)));
-      const units = Math.max(1, Math.min(maxUnits, Math.round(width / baseWidth)));
-      width = baseWidth * units;
-      height = baseHeight * units;
-      x = Math.round(x / SNAP_STEP) * SNAP_STEP;
-      y = Math.round(y / SNAP_STEP) * SNAP_STEP;
-    }
-
-    x = Math.max(0, Math.min(image.width - width, x));
-    y = Math.max(0, Math.min(image.height - height, y));
-
-    return {
-      x: Math.round(x),
-      y: Math.round(y),
-      width: Math.round(width),
-      height: Math.round(height)
-    };
-  }
-
-  function toCanvasRect(rect: SelectionRect) {
-    return {
-      x: displayX + rect.x * scale,
-      y: displayY + rect.y * scale,
-      width: rect.width * scale,
-      height: rect.height * scale
-    };
-  }
-
-  function handlePoints(rect: { x: number; y: number; width: number; height: number }) {
-    const midX = rect.x + rect.width / 2;
-    const midY = rect.y + rect.height / 2;
-
-    return [
-      { type: 'nw' as const, x: rect.x, y: rect.y },
-      { type: 'n' as const, x: midX, y: rect.y },
-      { type: 'ne' as const, x: rect.x + rect.width, y: rect.y },
-      { type: 'e' as const, x: rect.x + rect.width, y: midY },
-      { type: 'se' as const, x: rect.x + rect.width, y: rect.y + rect.height },
-      { type: 's' as const, x: midX, y: rect.y + rect.height },
-      { type: 'sw' as const, x: rect.x, y: rect.y + rect.height },
-      { type: 'w' as const, x: rect.x, y: midY }
-    ];
-  }
-
-  function draw() {
-    if (!context) return;
-
-    context.clearRect(0, 0, CANVAS_WIDTH, CANVAS_HEIGHT);
-    context.fillStyle = '#111827';
-    context.fillRect(0, 0, CANVAS_WIDTH, CANVAS_HEIGHT);
-
+  // ── Pointer drag (left on selection = move selection, else = pan) ────
+  function onPointerDown(e: PointerEvent) {
     if (!image) return;
+    const rect = container.getBoundingClientRect();
+    const mx = e.clientX - rect.left;
+    const my = e.clientY - rect.top;
 
-    computeDisplayRect();
-    context.drawImage(image, displayX, displayY, displayWidth, displayHeight);
-
-    if (!selection) return;
-
-    const rect = toCanvasRect(selection);
-
-    context.save();
-    context.fillStyle = 'rgba(15, 23, 42, 0.7)';
-    context.fillRect(0, 0, CANVAS_WIDTH, CANVAS_HEIGHT);
-    context.clearRect(rect.x, rect.y, rect.width, rect.height);
-    context.restore();
-
-    context.save();
-    context.beginPath();
-    context.rect(rect.x, rect.y, rect.width, rect.height);
-    context.clip();
-    context.drawImage(image, displayX, displayY, displayWidth, displayHeight);
-    context.strokeStyle = 'rgba(255, 255, 255, 0.34)';
-    context.lineWidth = 1;
-    context.setLineDash([6, 4]);
-
-    for (let col = 1; col < mapWidth; col += 1) {
-      const x = rect.x + (rect.width * col) / mapWidth;
-      context.beginPath();
-      context.moveTo(x, rect.y);
-      context.lineTo(x, rect.y + rect.height);
-      context.stroke();
+    if (e.button === 0 && mx >= selX && mx <= selX + SEL_W && my >= selY && my <= selY + selH) {
+      dragMode = 'sel';
+      dragOriginX = mx;
+      dragOriginY = my;
+      dragStartVal1 = selX;
+      dragStartVal2 = selY;
+    } else {
+      dragMode = 'pan';
+      dragOriginX = mx;
+      dragOriginY = my;
+      dragStartVal1 = imgOffsetX;
+      dragStartVal2 = imgOffsetY;
     }
 
-    for (let row = 1; row < mapHeight; row += 1) {
-      const y = rect.y + (rect.height * row) / mapHeight;
-      context.beginPath();
-      context.moveTo(rect.x, y);
-      context.lineTo(rect.x + rect.width, y);
-      context.stroke();
-    }
-
-    context.restore();
-
-    context.setLineDash([]);
-    context.strokeStyle = '#fff7b2';
-    context.lineWidth = 2;
-    context.strokeRect(rect.x, rect.y, rect.width, rect.height);
-    context.strokeStyle = 'rgba(255, 255, 255, 0.95)';
-    context.lineWidth = 1;
-    context.strokeRect(rect.x + 0.5, rect.y + 0.5, rect.width - 1, rect.height - 1);
-
-    for (const handle of handlePoints(rect)) {
-      context.fillStyle = '#f8fafc';
-      context.strokeStyle = '#0f172a';
-      context.lineWidth = 1.5;
-      context.beginPath();
-      context.rect(handle.x - HANDLE_SIZE / 2, handle.y - HANDLE_SIZE / 2, HANDLE_SIZE, HANDLE_SIZE);
-      context.fill();
-      context.stroke();
-    }
+    container.setPointerCapture(e.pointerId);
   }
 
-  function hitHandle(mouseX: number, mouseY: number): Handle {
-    if (!selection) return 'none';
+  function onPointerMove(e: PointerEvent) {
+    if (dragMode === 'none') return;
+    const rect = container.getBoundingClientRect();
+    const mx = e.clientX - rect.left;
+    const my = e.clientY - rect.top;
+    const dx = mx - dragOriginX;
+    const dy = my - dragOriginY;
 
-    const rect = toCanvasRect(selection);
-    for (const handle of handlePoints(rect)) {
-      if (Math.abs(mouseX - handle.x) <= HANDLE_SIZE && Math.abs(mouseY - handle.y) <= HANDLE_SIZE) {
-        return handle.type;
-      }
+    if (dragMode === 'sel') {
+      selX = dragStartVal1 + dx;
+      selY = dragStartVal2 + dy;
+    } else {
+      imgOffsetX = dragStartVal1 + dx;
+      imgOffsetY = dragStartVal2 + dy;
     }
 
-    if (
-      mouseX >= rect.x && mouseX <= rect.x + rect.width &&
-      mouseY >= rect.y && mouseY <= rect.y + rect.height
-    ) {
-      return 'move';
-    }
-
-    return 'none';
+    emitSelection();
   }
 
-  function mousePosition(event: MouseEvent) {
-    const rect = canvas.getBoundingClientRect();
-    const scaleX = CANVAS_WIDTH / rect.width;
-    const scaleY = CANVAS_HEIGHT / rect.height;
-
-    return {
-      x: (event.clientX - rect.left) * scaleX,
-      y: (event.clientY - rect.top) * scaleY
-    };
+  function onPointerUp() {
+    dragMode = 'none';
   }
 
-  function setCursor(handle: Handle) {
-    canvas.style.cursor =
-      handle === 'move' ? 'move' :
-      handle === 'n' || handle === 's' ? 'ns-resize' :
-      handle === 'e' || handle === 'w' ? 'ew-resize' :
-      handle === 'nw' || handle === 'se' ? 'nwse-resize' :
-      handle === 'ne' || handle === 'sw' ? 'nesw-resize' :
-      'crosshair';
-  }
-
-  function onMouseDown(event: MouseEvent) {
-    if (!selection) return;
-    const { x, y } = mousePosition(event);
-    const handle = hitHandle(x, y);
-    if (handle === 'none') return;
-
-    activeHandle = handle;
-    dragStartMouseX = x;
-    dragStartMouseY = y;
-    dragStartSelection = { ...selection };
-    setCursor(handle);
-  }
-
-  function onMouseMove(event: MouseEvent) {
-    if (!image || !selection) return;
-
-    const { x, y } = mousePosition(event);
-
-    if (activeHandle === 'none') {
-      setCursor(hitHandle(x, y));
-      return;
-    }
-
-    if (!dragStartSelection) return;
-
-    const deltaX = (x - dragStartMouseX) / scale;
-    const deltaY = (y - dragStartMouseY) / scale;
-    const start = dragStartSelection;
-    const aspect = mapWidth / mapHeight;
-
-    let next: SelectionRect = { ...start };
-
-    if (activeHandle === 'move') {
-      next.x = start.x + deltaX;
-      next.y = start.y + deltaY;
-    } else if (activeHandle === 'e') {
-      next.width = start.width + deltaX;
-      next.height = next.width / aspect;
-      next.y = start.y + (start.height - next.height) / 2;
-    } else if (activeHandle === 'w') {
-      next.width = start.width - deltaX;
-      next.height = next.width / aspect;
-      next.x = start.x + start.width - next.width;
-      next.y = start.y + (start.height - next.height) / 2;
-    } else if (activeHandle === 's') {
-      next.height = start.height + deltaY;
-      next.width = next.height * aspect;
-      next.x = start.x + (start.width - next.width) / 2;
-    } else if (activeHandle === 'n') {
-      next.height = start.height - deltaY;
-      next.width = next.height * aspect;
-      next.x = start.x + (start.width - next.width) / 2;
-      next.y = start.y + start.height - next.height;
-    } else if (activeHandle === 'se') {
-      next.width = start.width + deltaX;
-      next.height = next.width / aspect;
-    } else if (activeHandle === 'sw') {
-      next.width = start.width - deltaX;
-      next.height = next.width / aspect;
-      next.x = start.x + start.width - next.width;
-    } else if (activeHandle === 'ne') {
-      next.width = start.width + deltaX;
-      next.height = next.width / aspect;
-      next.y = start.y + start.height - next.height;
-    } else if (activeHandle === 'nw') {
-      next.width = start.width - deltaX;
-      next.height = next.width / aspect;
-      next.x = start.x + start.width - next.width;
-      next.y = start.y + start.height - next.height;
-    }
-
-    dispatch('selectionChange', clampSelection(next));
-  }
-
-  function onMouseUp() {
-    activeHandle = 'none';
-    dragStartSelection = null;
-    setCursor('none');
+  function onContextMenu(e: Event) {
+    e.preventDefault();
   }
 </script>
 
-<canvas
-  bind:this={canvas}
-  width={CANVAS_WIDTH}
-  height={CANVAS_HEIGHT}
-  class="workspace-canvas"
-  on:mousedown={onMouseDown}
-  on:mousemove={onMouseMove}
-  on:mouseup={onMouseUp}
-  on:mouseleave={onMouseUp}
-></canvas>
+<!-- svelte-ignore a11y_no_static_element_interactions -->
+<div
+  class="crop-container"
+  bind:this={container}
+  on:wheel|preventDefault={handleWheel}
+  on:pointerdown={onPointerDown}
+  on:pointermove={onPointerMove}
+  on:pointerup={onPointerUp}
+  on:pointerleave={onPointerUp}
+  on:contextmenu={onContextMenu}
+>
+  {#if image}
+    <img
+      src={image.src}
+      alt=""
+      class="crop-image"
+      style="transform: translate({imgOffsetX}px, {imgOffsetY}px) scale({imgScale}); transform-origin: 0 0;"
+      draggable="false"
+    />
+
+    <!-- Selection box — fixed screen size, dimmed overlay via box-shadow -->
+    <div
+      class="selection-box"
+      style="left: {selX}px; top: {selY}px; width: {SEL_W}px; height: {selH}px;"
+    >
+      {#each { length: mapWidth - 1 } as _, i}
+        <div class="grid-v" style="left: {((i + 1) / mapWidth) * 100}%"></div>
+      {/each}
+      {#each { length: mapHeight - 1 } as _, i}
+        <div class="grid-h" style="top: {((i + 1) / mapHeight) * 100}%"></div>
+      {/each}
+    </div>
+  {/if}
+</div>
 
 <style>
-  .workspace-canvas {
-    display: block;
+  .crop-container {
+    position: relative;
     width: 100%;
-    max-width: 100%;
+    aspect-ratio: 16 / 9;
+    background: #111827;
     border-radius: 12px;
     border: 1px solid rgba(148, 163, 184, 0.22);
-    background: #111827;
+    overflow: hidden;
+    cursor: grab;
     touch-action: none;
+    user-select: none;
+  }
+
+  .crop-container:active {
+    cursor: grabbing;
+  }
+
+  .crop-image {
+    position: absolute;
+    top: 0;
+    left: 0;
+    pointer-events: none;
+    image-rendering: auto;
+  }
+
+  .selection-box {
+    position: absolute;
+    border: 2px solid #fff7b2;
+    outline: 1px solid rgba(255, 255, 255, 0.95);
+    box-shadow: 0 0 0 9999px rgba(15, 23, 42, 0.7);
+    cursor: move;
+    z-index: 1;
+  }
+
+  .grid-v,
+  .grid-h {
+    position: absolute;
+    pointer-events: none;
+  }
+
+  .grid-v {
+    top: 0;
+    bottom: 0;
+    width: 0;
+    border-left: 1px dashed rgba(255, 255, 255, 0.34);
+  }
+
+  .grid-h {
+    left: 0;
+    right: 0;
+    height: 0;
+    border-top: 1px dashed rgba(255, 255, 255, 0.34);
   }
 </style>
