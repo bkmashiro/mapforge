@@ -25,6 +25,7 @@
   let renderTimeout: ReturnType<typeof setTimeout> | null = null;
   let lastLoadedFile: File | null = null;
   let isRendering = false;
+  let currentBlobUrl: string | null = null;
 
   $: if (imageFile !== lastLoadedFile) {
     void loadImageFile(imageFile);
@@ -41,6 +42,7 @@
   onDestroy(() => {
     if (debounceTimer) clearTimeout(debounceTimer);
     if (renderTimeout) clearTimeout(renderTimeout);
+    if (currentBlobUrl) URL.revokeObjectURL(currentBlobUrl);
   });
 
   async function loadImageFile(file: File | null) {
@@ -54,7 +56,14 @@
 
     if (!file) return;
 
+    // Revoke previous blob URL before creating a new one
+    if (currentBlobUrl) {
+      URL.revokeObjectURL(currentBlobUrl);
+      currentBlobUrl = null;
+    }
+
     const url = URL.createObjectURL(file);
+    currentBlobUrl = url; // Keep alive so InlineCropWorkspace can use image.src
 
     try {
       const nextImage = await new Promise<HTMLImageElement>((resolve, reject) => {
@@ -64,13 +73,18 @@
         img.src = url;
       });
 
-      if (lastLoadedFile !== file) return;
+      if (lastLoadedFile !== file) {
+        // A newer file was requested; clean up this blob URL
+        URL.revokeObjectURL(url);
+        if (currentBlobUrl === url) currentBlobUrl = null;
+        return;
+      }
       image = nextImage;
       // InlineCropWorkspace will emit the initial selection via selectionChange
     } catch (error) {
       console.error('Failed to load image:', error);
-    } finally {
       URL.revokeObjectURL(url);
+      if (currentBlobUrl === url) currentBlobUrl = null;
     }
   }
 
