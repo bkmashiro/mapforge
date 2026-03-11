@@ -291,6 +291,7 @@
       previewTiles = buildPreviewTiles(data.previewData);
       progress = 100;
       isConverting = false;
+      isRenderQueued = false;
       await drawPreviewTilesToCanvases();
     };
 
