@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount, onDestroy } from 'svelte';
+  import { onMount, onDestroy, tick } from 'svelte';
   import type { McVersion, StaircaseMode, DitherMethod } from '$lib/types.js';
   import { generateSchem, generateLitematic } from '$lib/nbt.js';
   import coloursJSON from '$lib/data/colours.json';
@@ -258,7 +258,7 @@
       { type: 'module' }
     );
 
-    worker.onmessage = (e) => {
+    worker.onmessage = async (e) => {
       const data = e.data;
       if (data.type === 'progress') {
         progress = data.progress;
@@ -267,6 +267,9 @@
         materials = data.materials;
         progress = 100;
         isConverting = false;
+
+        // Wait for Svelte to render the canvas (it's inside {#if resultPixels.length})
+        await tick();
 
         if (resultCanvas) {
           const rctx = resultCanvas.getContext('2d')!;
