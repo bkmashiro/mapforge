@@ -9,6 +9,8 @@
 [![MIT License](https://img.shields.io/badge/license-MIT-22c55e?style=for-the-badge)](LICENSE)
 [![SvelteKit](https://img.shields.io/badge/SvelteKit-FF3E00?style=for-the-badge&logo=svelte&logoColor=white)](https://kit.svelte.dev)
 
+**English** | [中文](README.zh.md)
+
 </div>
 
 ---
