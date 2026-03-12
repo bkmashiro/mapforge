@@ -11,6 +11,7 @@
   export let image: HTMLImageElement | null = null;
   export let mapWidth = 1;
   export let mapHeight = 1;
+  export let rotation: 0 | 90 | 180 | 270 = 0;
 
   const dispatch = createEventDispatcher<{ selectionChange: SelectionRect }>();
 
@@ -23,7 +24,7 @@
   let imgOffsetX = 0;
   let imgOffsetY = 0;
 
-  // Selection box — fixed screen-pixel size, movable
+  // Selection box - fixed screen-pixel size, movable
   const SEL_W = 240;
   $: selH = SEL_W * (mapHeight / mapWidth);
   let selX = 0;
@@ -65,15 +66,15 @@
 
   function emitSelection() {
     if (!image) return;
-    const tl = screenToImage(selX, selY);
-    const w = SEL_W / imgScale;
-    const h = selH / imgScale;
-
+    // Pass full context so extraction can replicate exact visual result
     dispatch('selectionChange', {
-      x: Math.max(0, Math.round(tl.x)),
-      y: Math.max(0, Math.round(tl.y)),
-      width: Math.max(1, Math.round(w)),
-      height: Math.max(1, Math.round(h)),
+      x: 0, y: 0, width: 1, height: 1, // legacy fields (unused when _ctx present)
+      _ctx: {
+        containerW, containerH,
+        imgOffsetX, imgOffsetY, imgScale,
+        selX, selY, selW: SEL_W, selH,
+        rotation,
+      }
     });
   }
 
@@ -88,9 +89,6 @@
     imgScale = Math.min(sx, sy) * 0.88;
     imgOffsetX = (containerW - image.width * imgScale) / 2;
     imgOffsetY = (containerH - image.height * imgScale) / 2;
-
-    selX = (containerW - SEL_W) / 2;
-    selY = (containerH - selH) / 2;
 
     initialized = true;
     emitSelection();
@@ -107,16 +105,12 @@
   }
 
   // Update selection when map aspect changes
-  let prevMapKey = '';
-  $: {
-    const key = `${mapWidth}x${mapHeight}`;
-    if (initialized && key !== prevMapKey) {
-      prevMapKey = key;
-      selX = (containerW - SEL_W) / 2;
-      selY = (containerH - selH) / 2;
-      emitSelection();
-    }
-  }
+  // Selection is always centered — recompute whenever container or map dims change
+  $: selX = (containerW - SEL_W) / 2;
+  $: selY = (containerH - selH) / 2;
+  $: if (initialized && (selX || selY || selX === 0)) emitSelection();
+  // Re-emit when rotation changes so _ctx stays fresh
+  $: if (initialized) { rotation; emitSelection(); }
 
   // ── Zoom (scroll wheel, centered on mouse) ──────────────────────────
   function handleWheel(e: WheelEvent) {
@@ -138,46 +132,25 @@
     emitSelection();
   }
 
-  // ── Pointer drag (left on selection = move selection, else = pan) ────
+  // ── Pointer drag (pan image only; selection is fixed center) ─────────
   function onPointerDown(e: PointerEvent) {
     if (!image) return;
     const rect = container.getBoundingClientRect();
-    const mx = e.clientX - rect.left;
-    const my = e.clientY - rect.top;
-
-    if (e.button === 0 && mx >= selX && mx <= selX + SEL_W && my >= selY && my <= selY + selH) {
-      dragMode = 'sel';
-      dragOriginX = mx;
-      dragOriginY = my;
-      dragStartVal1 = selX;
-      dragStartVal2 = selY;
-    } else {
-      dragMode = 'pan';
-      dragOriginX = mx;
-      dragOriginY = my;
-      dragStartVal1 = imgOffsetX;
-      dragStartVal2 = imgOffsetY;
-    }
-
+    dragMode = 'pan';
+    dragOriginX = e.clientX - rect.left;
+    dragOriginY = e.clientY - rect.top;
+    dragStartVal1 = imgOffsetX;
+    dragStartVal2 = imgOffsetY;
     container.setPointerCapture(e.pointerId);
   }
 
   function onPointerMove(e: PointerEvent) {
     if (dragMode === 'none') return;
     const rect = container.getBoundingClientRect();
-    const mx = e.clientX - rect.left;
-    const my = e.clientY - rect.top;
-    const dx = mx - dragOriginX;
-    const dy = my - dragOriginY;
-
-    if (dragMode === 'sel') {
-      selX = dragStartVal1 + dx;
-      selY = dragStartVal2 + dy;
-    } else {
-      imgOffsetX = dragStartVal1 + dx;
-      imgOffsetY = dragStartVal2 + dy;
-    }
-
+    const dx = (e.clientX - rect.left) - dragOriginX;
+    const dy = (e.clientY - rect.top) - dragOriginY;
+    imgOffsetX = dragStartVal1 + dx;
+    imgOffsetY = dragStartVal2 + dy;
     emitSelection();
   }
 
@@ -187,6 +160,14 @@
 
   function onContextMenu(e: Event) {
     e.preventDefault();
+  }
+
+  let copyFlash = false;
+  function copyParams() {
+    const params = JSON.stringify({ x: Math.round(imgOffsetX), y: Math.round(imgOffsetY), scale: +imgScale.toFixed(4), rotation });
+    navigator.clipboard.writeText(params);
+    copyFlash = true;
+    setTimeout(() => (copyFlash = false), 1200);
   }
 </script>
 
@@ -202,15 +183,23 @@
   on:contextmenu={onContextMenu}
 >
   {#if image}
-    <img
-      src={image.src}
-      alt=""
-      class="crop-image"
-      style="transform: translate({imgOffsetX}px, {imgOffsetY}px) scale({imgScale}); transform-origin: 0 0;"
-      draggable="false"
-    />
+    <div class="transform-layer" style="transform: rotate({rotation}deg); transform-origin: center center;">
+      <img
+        src={image.src}
+        alt=""
+        class="crop-image"
+        style="transform: translate({imgOffsetX}px, {imgOffsetY}px) scale({imgScale}); transform-origin: 0 0;"
+        draggable="false"
+      />
+    </div>
 
-    <!-- Selection box — fixed screen size, dimmed overlay via box-shadow -->
+    <!-- Bottom-left offset badge -->
+    <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
+    <div class="offset-badge" class:flash={copyFlash} on:click|stopPropagation={copyParams} title="Click to copy params">
+      {copyFlash ? '✓ Copied!' : `x:${Math.round(imgOffsetX)} y:${Math.round(imgOffsetY)} ×${imgScale.toFixed(2)}`}
+    </div>
+
+    <!-- Selection box - fixed screen size, dimmed overlay via box-shadow -->
     <div
       class="selection-box"
       style="left: {selX}px; top: {selY}px; width: {SEL_W}px; height: {selH}px;"
@@ -243,6 +232,12 @@
     cursor: grabbing;
   }
 
+  .transform-layer {
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+  }
+
   .crop-image {
     position: absolute;
     top: 0;
@@ -250,6 +245,25 @@
     pointer-events: none;
     image-rendering: auto;
   }
+
+  .offset-badge {
+    position: absolute;
+    bottom: 8px;
+    left: 8px;
+    z-index: 10;
+    background: rgba(15, 23, 42, 0.82);
+    color: #94a3b8;
+    font-size: 11px;
+    font-family: monospace;
+    padding: 3px 8px;
+    border-radius: 4px;
+    border: 1px solid rgba(148, 163, 184, 0.18);
+    cursor: pointer;
+    user-select: none;
+    transition: color 0.2s;
+  }
+  .offset-badge:hover { color: #e2e8f0; }
+  .offset-badge.flash { color: #4ade80; border-color: #4ade80; }
 
   .selection-box {
     position: absolute;

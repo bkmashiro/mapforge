@@ -2,11 +2,15 @@
   import { createEventDispatcher, onDestroy } from 'svelte';
   import InlineCropWorkspace from '$lib/InlineCropWorkspace.svelte';
 
+  interface RenderCtx {
+    containerW: number; containerH: number;
+    imgOffsetX: number; imgOffsetY: number; imgScale: number;
+    selX: number; selY: number; selW: number; selH: number;
+    rotation: number;
+  }
   interface SelectionRect {
-    x: number;
-    y: number;
-    width: number;
-    height: number;
+    x: number; y: number; width: number; height: number;
+    _ctx?: RenderCtx;
   }
 
   export let imageFile: File | null = null;
@@ -14,6 +18,7 @@
   export let mapHeight = 1;
   export let resizeFilter: 'lanczos' | 'bilinear' | 'nearest' = 'lanczos';
   export let bgColor = '#FFFFFF';
+  export let rotation: 0 | 90 | 180 | 270 = 0;
 
   const dispatch = createEventDispatcher<{
     crop: { croppedImageData: ImageData };
@@ -32,11 +37,12 @@
     void loadImageFile(imageFile);
   }
 
-  // Trigger crop whenever selection, resizeFilter, or map dims change
+  // Trigger crop whenever selection, resizeFilter, map dims, or transform changes
   $: if (image && selection) {
     resizeFilter;
     mapWidth;
     mapHeight;
+    rotation;
     scheduleCrop();
   }
 
@@ -90,24 +96,54 @@
   }
 
   function extractCroppedImageData(source: HTMLImageElement, rect: SelectionRect): ImageData {
-    const width = mapWidth * 128;
-    const height = mapHeight * 128;
-    cropCanvas ??= document.createElement('canvas');
-    cropCanvas.width = width;
-    cropCanvas.height = height;
-    const context = cropCanvas.getContext('2d')!;
+    const outW = mapWidth * 128;
+    const outH = mapHeight * 128;
 
-    if (resizeFilter === 'nearest') {
-      context.imageSmoothingEnabled = false;
-    } else {
-      context.imageSmoothingEnabled = true;
-      context.imageSmoothingQuality = resizeFilter === 'bilinear' ? 'medium' : 'high';
+    const c = rect._ctx;
+    if (c) {
+      // Render image to container-sized canvas with transforms applied (exactly as CSS does)
+      const tmp = document.createElement('canvas');
+      tmp.width = c.containerW; tmp.height = c.containerH;
+      const tc = tmp.getContext('2d')!;
+      tc.fillStyle = bgColor;
+      tc.fillRect(0, 0, c.containerW, c.containerH);
+      const cx = c.containerW / 2, cy = c.containerH / 2;
+      tc.save();
+      tc.translate(cx, cy);
+      if (c.rotation) tc.rotate((c.rotation * Math.PI) / 180);
+      tc.translate(-cx, -cy);
+      tc.drawImage(source, c.imgOffsetX, c.imgOffsetY,
+        source.naturalWidth * c.imgScale, source.naturalHeight * c.imgScale);
+      tc.restore();
+
+      // Extract exactly what's under the selection box
+      const selData = tc.getImageData(c.selX, c.selY, c.selW, c.selH);
+      const selCanvas = document.createElement('canvas');
+      selCanvas.width = c.selW; selCanvas.height = c.selH;
+      selCanvas.getContext('2d')!.putImageData(selData, 0, 0);
+
+      cropCanvas ??= document.createElement('canvas');
+      cropCanvas.width = outW; cropCanvas.height = outH;
+      const oc = cropCanvas.getContext('2d')!;
+      oc.fillStyle = bgColor; oc.fillRect(0, 0, outW, outH);
+      oc.imageSmoothingEnabled = resizeFilter !== 'nearest';
+      if (resizeFilter === 'bilinear') oc.imageSmoothingQuality = 'medium';
+      else if (resizeFilter === 'lanczos') oc.imageSmoothingQuality = 'high';
+      oc.drawImage(selCanvas, 0, 0, outW, outH);
+      return oc.getImageData(0, 0, outW, outH);
     }
 
+    // No transforms — original approach
+    cropCanvas ??= document.createElement('canvas');
+    cropCanvas.width = outW; cropCanvas.height = outH;
+    const context = cropCanvas.getContext('2d')!;
+    context.imageSmoothingEnabled = resizeFilter !== 'nearest';
+    if (resizeFilter === 'bilinear') context.imageSmoothingQuality = 'medium';
+    else if (resizeFilter === 'lanczos') context.imageSmoothingQuality = 'high';
     context.fillStyle = bgColor;
-    context.fillRect(0, 0, width, height);
-    context.drawImage(source, rect.x, rect.y, rect.width, rect.height, 0, 0, width, height);
-    return context.getImageData(0, 0, width, height);
+    context.fillRect(0, 0, outW, outH);
+    context.drawImage(source, rect.x, rect.y, rect.width, rect.height, 0, 0, outW, outH);
+    return context.getImageData(0, 0, outW, outH);
   }
 
   function scheduleCrop() {
@@ -144,7 +180,7 @@
 
 <div class="inline-workspace-shell">
   {#if image}
-    <InlineCropWorkspace {image} {mapWidth} {mapHeight} on:selectionChange={onSelectionChange} />
+    <InlineCropWorkspace {image} {mapWidth} {mapHeight} {rotation} on:selectionChange={onSelectionChange} />
     {#if isRendering}
       <div class="render-badge">Rendering...</div>
     {/if}

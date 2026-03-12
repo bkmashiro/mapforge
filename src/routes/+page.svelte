@@ -1,11 +1,12 @@
 <script lang="ts">
-  import { onMount, onDestroy } from 'svelte';
+  import { onMount, onDestroy, tick } from 'svelte';
   import type { McVersion, StaircaseMode, DitherMethod } from '$lib/types.js';
   import { generateSchem, generateLitematic } from '$lib/nbt.js';
   import coloursJSON from '$lib/data/colours.json';
   import { locale, t, selectedVariants, advancedSettings, DEFAULT_ADVANCED } from '$lib/stores.js';
   import { getCategory, CATEGORY_ORDER, type BlockCategory } from '$lib/blockCategories.js';
   import InlineWorkspace from '$lib/InlineWorkspace.svelte';
+  import { blockMeta } from '$lib/blockMeta.js';
   import Tooltip from '$lib/Tooltip.svelte';
 
   interface BlockVariant {
@@ -51,12 +52,16 @@
   let croppedImageData: ImageData | null = null;
   let cropGeneration = 0;
   let bgColor = '#FFFFFF';
+  let rotation: 0 | 90 | 180 | 270 = 0;
+  function rotateLeft()  { rotation = ((rotation - 90 + 360) % 360) as 0|90|180|270; }
+  function rotateRight() { rotation = ((rotation + 90) % 360) as 0|90|180|270; }
   let previewCanvases: HTMLCanvasElement[] = [];
   let previewTiles: PreviewTile[] = [];
   let renderDebounce: ReturnType<typeof setTimeout> | null = null;
   let lastMapSizeKey = '1x1';
 
   let isDragOver = false;
+  let dropzoneInput: HTMLInputElement;
   let isConverting = false;
   let isRenderQueued = false;
   let progress = 0;
@@ -272,6 +277,8 @@
     });
   }
 
+
+
   async function convert() {
     if (!croppedImageData || !colourSets.some((colour) => colour.enabled)) return;
 
@@ -288,7 +295,6 @@
         progress = data.progress;
         return;
       }
-
       resultPixels = data.pixels;
       materials = data.materials;
       previewTiles = buildPreviewTiles(data.previewData);
@@ -419,7 +425,8 @@
         width: croppedImageData.width,
         height: croppedImageData.height,
         cropGeneration,
-        bgColor
+        bgColor,
+        rotation
       })
     : '';
 
@@ -791,8 +798,8 @@
         <div class="workspace-toolbar">
           <div class="workspace-toolbar-block">
             <div class="workspace-title-row">
-              <h3 class="workspace-title">Image Workspace</h3>
-              <span class="workspace-subtitle">Drag to move · resize with 8 handles · auto-renders after 800ms</span>
+              <h3 class="workspace-title">{$t.imageWorkspace}</h3>
+              <span class="workspace-subtitle">{$t.workspaceHint}</span>
             </div>
             <div class="preset-grid">
               {#each MAP_PRESETS as [pw, ph]}
@@ -820,7 +827,7 @@
               </select>
             </div>
             <label class="file-btn small">
-              {imageFile ? $t.changeImage : 'Browse file'}
+              {imageFile ? $t.changeImage : $t.browseFile}
               <input type="file" accept="image/*" on:change={onFileInput} class="hidden-input" />
             </label>
           </div>
@@ -834,11 +841,19 @@
             on:dragover|preventDefault={() => (isDragOver = true)}
             on:dragleave={() => (isDragOver = false)}
             on:drop={onDrop}
+            on:click={() => dropzoneInput.click()}
           >
+            <input
+              type="file"
+              accept="image/*"
+              class="hidden-input"
+              bind:this={dropzoneInput}
+              on:change={onFileInput}
+            />
             <div class="drop-prompt">
               <div class="drop-icon">📁</div>
               <p>{$t.upload}</p>
-              <span class="drop-hint">Drop image here or click to upload</span>
+              <span class="drop-hint">{$t.upload}</span>
             </div>
           </div>
         {:else}
@@ -848,16 +863,21 @@
             {mapHeight}
             resizeFilter={$advancedSettings.resizeFilter}
             {bgColor}
+            {rotation}
             on:crop={onCrop}
           />
 
           <div class="workspace-meta">
             <span>{imageFileName} · target {mapWidth * 128}×{mapHeight * 128}px</span>
             {#if croppedImageData}
-              <span>Output {croppedImageData.width}×{croppedImageData.height}px · row-major export order</span>
+              <span>{$t.outputSize(croppedImageData.width, croppedImageData.height)}</span>
             {/if}
+            <div class="transform-controls">
+              <button class="icon-btn" on:click={rotateLeft} title={$t.rotateLeft}>↺</button>
+              <button class="icon-btn" on:click={rotateRight} title={$t.rotateRight}>↻</button>
+            </div>
             <label class="bg-color-label">
-              <span>Background</span>
+              <span>{$t.bgColor}</span>
               <input type="color" bind:value={bgColor} title="Fill color for areas outside image" />
             </label>
           </div>
@@ -868,8 +888,8 @@
         <section class="preview-section">
           <div class="preview-section-header">
             <div>
-              <h3 class="workspace-title">Preview</h3>
-              <div class="workspace-subtitle">{mapWidth}×{mapHeight} maps · row-major export order</div>
+              <h3 class="workspace-title">{$t.previewSection}</h3>
+              <div class="workspace-subtitle">{$t.previewSubtitle(mapWidth, mapHeight)}</div>
             </div>
 
             <div class="scale-controls">
@@ -894,12 +914,12 @@
                       bind:this={previewCanvases[index]}
                       class="preview-tile-canvas"
                       style={`width:${previewTileSize}px; height:${previewTileSize}px; image-rendering:pixelated;`}
-                      title="Click to download"
+                      title={$t.clickDownload}
                       on:click={() => downloadTileCanvas(index, cell.row, cell.col)}
                     ></canvas>
                   {:else}
                     <div class="preview-placeholder" style={`width:${previewTileSize}px; height:${previewTileSize}px;`}>
-                      Waiting for render…
+                      {$t.waitingRender}
                     </div>
                   {/if}
                 </div>
@@ -910,7 +930,7 @@
               <div class="preview-loading-overlay">
                 <div class="preview-loading-card">
                   <div class="spinner"></div>
-                  <div class="preview-loading-text">Rendering…</div>
+                  <div class="preview-loading-text">{$t.rendering}</div>
                 </div>
               </div>
             {/if}
@@ -929,13 +949,13 @@
     <!-- ── Right panel: export + materials ──────────────────────────── -->
     <aside class="panel right-panel">
       <div class="panel-header">
-        <h2>Export</h2>
+        <h2>{$t.exportSection}</h2>
       </div>
 
       {#if mapWidth * mapHeight > 1}
         <div class="export-groups">
           <div class="export-group">
-            <div class="export-group-title">Schem</div>
+            <div class="export-group-title">{$t.exportGroupSchem}</div>
             <div class="export-btns dual">
               <button class="export-btn" on:click={exportSchem} disabled={!resultPixels.length}>📦 {$t.exportAll}</button>
               <button class="export-btn secondary" on:click={exportIndividualMaps} disabled={!resultPixels.length}>🧩 {$t.exportIndividual}</button>
@@ -943,7 +963,7 @@
           </div>
 
           <div class="export-group">
-            <div class="export-group-title">Litematic</div>
+            <div class="export-group-title">{$t.exportGroupLitematic}</div>
             <div class="export-btns">
               <button class="export-btn" on:click={exportLitematic} disabled={!resultPixels.length}>🗺️ {$t.exportLitematic}</button>
             </div>
@@ -974,8 +994,14 @@
               </thead>
               <tbody>
                 {#each sortedMaterials as [name, count]}
+                  {@const meta = blockMeta[name]}
                   <tr>
-                    <td class="mat-name">{name}</td>
+                    <td class="mat-name">
+                      {$locale === 'zh' && meta?.zh ? meta.zh : name}
+                      {#if meta?.nbt}
+                        <span class="mat-nbt">minecraft:{meta.nbt}</span>
+                      {/if}
+                    </td>
                     <td class="mat-count">{count}</td>
                     <td class="mat-stack">{stackCount(count)}</td>
                   </tr>
@@ -1149,7 +1175,7 @@
 
   .left-panel  { width: 280px; flex-shrink: 0; }
   .right-panel {
-    width: 260px; flex-shrink: 0;
+    width: 320px; flex-shrink: 0;
     border-right: none;
     border-left: 1px solid var(--border);
   }
@@ -1589,10 +1615,18 @@
 
   .mat-name {
     color: var(--text);
+    max-width: 160px;
+  }
+
+  .mat-nbt {
+    display: block;
+    font-size: 10px;
+    color: #475569;
+    font-family: monospace;
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
-    max-width: 90px;
+    max-width: 150px;
   }
 
   .mat-count { color: var(--text-muted); text-align: right; }
@@ -1868,6 +1902,29 @@
     gap: 12px;
     flex-wrap: wrap;
   }
+
+  .transform-controls {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+  }
+
+  .icon-btn {
+    background: rgba(255,255,255,0.05);
+    border: 1px solid #334155;
+    color: #94a3b8;
+    border-radius: 5px;
+    width: 28px;
+    height: 28px;
+    font-size: 15px;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: all 0.15s;
+  }
+  .icon-btn:hover { background: rgba(255,255,255,0.1); color: #e2e8f0; }
+  .icon-btn.active { background: #1e3a5f; border-color: #3b82f6; color: #60a5fa; }
 
   .bg-color-label {
     display: flex;
